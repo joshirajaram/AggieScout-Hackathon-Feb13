@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import warnings
+from typing import Optional
 
 warnings.filterwarnings("ignore", message=".*Python version 3.9.*")
 warnings.filterwarnings("ignore", message=".*urllib3 v2 only supports OpenSSL.*")
@@ -20,9 +21,10 @@ except ImportError:
 load_dotenv()
 
 TEAMMATE_B_SYSTEM_PROMPT = (
-    "You are an agricultural advisory assistant. You must output ONLY your recommended "
-    "mitigation steps as plain text (bullets or short paragraphs). Never repeat, quote, or "
-    "echo the sensor data or the user's question in your response."
+    "You are an agricultural advisory assistant. You MUST answer the specific question "
+    "the farmer asked. Do not give a generic summary—respond directly to what they asked "
+    "using the sensor data provided. Use plain text, bullets or short paragraphs. "
+    "Never repeat or echo the raw sensor JSON in your response."
 )
 
 
@@ -44,9 +46,9 @@ def _fallback_mitigation(user_query: str, sensor_data: dict) -> str:
         if temp > 90:
             return f"High temp ({temp}°F) detected. Increase irrigation frequency for {location} immediately to prevent heat stress."
         elif temp < 35:
-            return f"nLow temp ({temp}°F) detected. Avoid irrigation to prevent freezing on plants unless using for frost protection."
+            return f"Low temp ({temp}°F) detected. Avoid irrigation to prevent freezing on plants unless using for frost protection."
         elif humidity > 80:
-             return f"Humidity is high ({humidity}%). Reduce irrigation to prevent fungal issues."
+            return f"Humidity is high ({humidity}%). Reduce irrigation to prevent fungal issues."
         return f"Soil moisture logic unavailable, but environmental conditions (Temp: {temp}°F) are stable. maintain standard irrigation schedule for {location}."
         
     if "spray" in query or "pesticide" in query or "fertilizer" in query or "treat" in query:
@@ -55,31 +57,34 @@ def _fallback_mitigation(user_query: str, sensor_data: dict) -> str:
         if temp > 85:
             return f"Temp is {temp}°F. Avoid spraying; evaporation/burn risk is high."
         if temp < 40:
-             return f"Temp is low ({temp}°F). Spraying may be ineffective or cause freezing damage."
+            return f"Temp is low ({temp}°F). Spraying may be ineffective or cause freezing damage."
         return f"Conditions (Wind: {wind} mph, Temp: {temp}°F) are suitable for spraying."
         
     if "harvest" in query:
         if humidity > 80:
             return f"High humidity ({humidity}%) may affect harvest quality/drying."
         if temp > 95:
-             return f"Extreme heat ({temp}°F). Ensure worker safety during harvest."
+            return f"Extreme heat ({temp}°F). Ensure worker safety during harvest."
         return f"Conditions seem favorable for harvest operations."
 
-    # Default logic (original) if no specific keywords match
+    # Any other question: acknowledge it and respond using current conditions (no keyword match)
+    cond = f"Current conditions: {temp}°F, wind {wind} mph, humidity {humidity}% at {location}."
     if temp <= 32:
         return (
-            "CRITICAL FROST – recommended steps:\n"
-            "• Cover or move sensitive crops/equipment if possible.\n"
-            "• Avoid irrigation; wet surfaces freeze faster.\n"
-            "• Use wind machines or approved heating if available.\n"
-            "• Check pipes and valves for freeze risk.\n"
-            f"• Monitor {location} and repeat readings as conditions change."
+            f"You asked: \"{user_query}\"\n\n"
+            f"{cond} CRITICAL FROST risk.\n\n"
+            "• Cover or move sensitive crops if possible; avoid irrigation; use wind machines or heating if available; check pipes for freeze risk."
+        )
+    if temp >= 95:
+        return (
+            f"You asked: \"{user_query}\"\n\n"
+            f"{cond} High heat.\n\n"
+            "• Increase irrigation frequency, provide shade/ventilation where possible, and monitor for heat stress."
         )
     return (
-        "Conditions are above freezing. Recommended:\n"
-        "• Continue normal monitoring.\n"
-        "• Plan for possible frost if temps are expected to drop overnight.\n"
-        f"• Keep an eye on {location} and humidity for disease risk."
+        f"You asked: \"{user_query}\"\n\n"
+        f"{cond}\n\n"
+        "• Conditions are in a moderate range. Continue normal monitoring; use the crop rules in the app for frost/heat thresholds."
     )
 
 
@@ -94,8 +99,9 @@ def get_mitigation_response(
         try:
             client = genai.Client(api_key=gemini_key)
             user_message = (
-                f"Question: {user_query}\n\n"
-                f"Current sensor data (use this to answer):\n{sensor_context}"
+                f"The farmer asks: \"{user_query}\"\n\n"
+                f"Answer this specific question using only the sensor data below. Do not ignore the question.\n\n"
+                f"Sensor data:\n{sensor_context}"
             )
             response = client.models.generate_content(
                 model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
@@ -146,7 +152,21 @@ def _sensor_to_summary(sensor_data: list) -> tuple[str, object]:
     return prefix, readings[0]
 
 
-def generate_alert(user_text: str, sensor_source: str = "frost") -> str:
+def _infer_sensor_source(user_text: str) -> str:
+    """Pick frost/heat/normal from the user's question when obvious."""
+    q = user_text.lower().strip()
+    if not q:
+        return "frost"
+    if any(w in q for w in ("heat", "hot", "summer", "drought", "102", "100")):
+        return "heat"
+    if any(w in q for w in ("normal", "ok", "baseline", "routine")):
+        return "normal"
+    return "frost"
+
+
+def generate_alert(user_text: str, sensor_source: Optional[str] = None) -> str:
+    if sensor_source is None:
+        sensor_source = _infer_sensor_source(user_text)
     script_dir = os.path.dirname(os.path.abspath(__file__))
     sensor_data = _read_sensor(script_dir, sensor_source)
     prefix, fallback_ref = _sensor_to_summary(sensor_data)
@@ -163,14 +183,18 @@ def generate_alert(user_text: str, sensor_source: str = "frost") -> str:
     )
 
 
-async def generate_alert_async(user_text: str, sensor_source: str = "frost") -> str:
+async def generate_alert_async(user_text: str, sensor_source: Optional[str] = None) -> str:
     return generate_alert(user_text, sensor_source=sensor_source)
 
 
 if __name__ == "__main__":
-    source = sys.argv[1] if len(sys.argv) > 1 else "frost"
-    if source not in ("frost", "heat", "normal"):
-        print("Usage: python llm_engine.py [frost|heat|normal]")
+    argv = sys.argv[1:]
+    source = argv[0] if argv and argv[0] in ("frost", "heat", "normal") else "frost"
+    query = " ".join(argv[1:]).strip() if len(argv) > 1 else "What should we do right now?"
+    if not query:
+        query = "What should we do right now?"
+    if argv and argv[0] not in ("frost", "heat", "normal"):
+        print("Usage: python llm_engine.py [frost|heat|normal] [your question]")
         sys.exit(1)
-    result = generate_alert("What should we do right now?", sensor_source=source)
+    result = generate_alert(query, sensor_source=source)
     print(result)
