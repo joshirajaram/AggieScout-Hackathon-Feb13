@@ -1,121 +1,122 @@
 import json
-import requests
 import os
+import sys
+import warnings
+
+warnings.filterwarnings("ignore", message=".*Python version 3.9.*")
+warnings.filterwarnings("ignore", message=".*urllib3 v2 only supports OpenSSL.*")
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.auth")
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.oauth2")
+
 from dotenv import load_dotenv
-import google.generativeai as genai
+
+try:
+    from google import genai
+except ImportError:
+    genai = None
 
 load_dotenv()
 
-# Gemini API Configuration
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+TEAMMATE_B_SYSTEM_PROMPT = (
+    "You are an agricultural advisory assistant. You must output ONLY your recommended "
+    "mitigation steps as plain text (bullets or short paragraphs). Never repeat, quote, or "
+    "echo the sensor data or the user's question in your response."
+)
 
-def get_weather_data():
-    """Fetches current weather data for Davis, CA using Open-Meteo."""
-    try:
-        url = "https://api.open-meteo.com/v1/forecast"
-        params = {
-            "latitude": 38.5449,
-            "longitude": -121.7405,
-            "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
-            "temperature_unit": "fahrenheit",
-            "wind_speed_unit": "mph"
-        }
-        response = requests.get(url, params=params)
-        if response.status_code == 200:
-            return response.json().get('current', {})
-        else:
-            return {"error": f"Failed to fetch weather: {response.status_code}"}
-    except Exception as e:
-        return {"error": f"Exception fetching weather: {str(e)}"}
 
-def get_gemini_response(prompt):
-    """Sends the prompt to the Gemini LLM."""
-    if not GEMINI_API_KEY:
-        return "Error: GEMINI_API_KEY not found in environment variables."
-    
-    try:
-        model = genai.GenerativeModel('gemini-pro')
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"Error: Gemini API returned invalid response - {str(e)}"
-
-async def check_for_alerts():
-    """Autonomous check for emergency conditions without user input."""
-    # 1. Load System Prompt
-    try:
-        with open('prompts/system_prompt.txt', 'r') as f:
-            system_instructions = f.read()
-    except FileNotFoundError:
-        try: 
-            with open('system_prompt.txt', 'r') as f:
-                system_instructions = f.read()
-        except:
-             system_instructions = "Act as an expert agricultural assistant."
-
-    # 2. Load Sensor Data - simulating reading from the 'live' sensor in data/
-    # For the hackathon, we'll pick one file or expect 'data/current.json'
-    # Let's try to find a valid sensor file in data/
-    sensor_data = {}
-    try:
-        # Check for a 'current.json' first, fallback to 'heat_sensor.json' for demo
-        target_file = 'data/heat_sensor.json' 
-        if os.path.exists('data/current_sensor.json'):
-            target_file = 'data/current_sensor.json'
-            
-        with open(target_file, 'r') as f:
-            sensor_data = json.load(f)
-    except Exception as e:
-        return None # No data, no alert
-
-    # 3. Failsafe Logic + Weather
-    temp = sensor_data.get('temp_f', 70)
-    weather_data = get_weather_data()
-    
-    # Simple Heuristic Trigger for the Hackathon
-    # Use LLM to decide if it's worthy of an alert
-    if temp >= 90 or temp <= 35:
-        prompt = (
-            f"{system_instructions}\n\n"
-            f"TASK: Analyze this situation and generate a short EMERGENCY ALERT if needed. If no emergency, return 'NO_ALERT'.\n"
-            f"REAL-TIME WEATHER: {json.dumps(weather_data)}\n"
-            f"FIELD SENSORS: {json.dumps(sensor_data)}\n"
+def _fallback_mitigation(sensor_data: dict) -> str:
+    temp = sensor_data.get("temp_f", 0)
+    location = sensor_data.get("location") or sensor_data.get("crop") or "the field"
+    if temp <= 32:
+        return (
+            "CRITICAL FROST – recommended steps:\n"
+            "• Cover or move sensitive crops/equipment if possible.\n"
+            "• Avoid irrigation; wet surfaces freeze faster.\n"
+            "• Use wind machines or approved heating if available.\n"
+            "• Check pipes and valves for freeze risk.\n"
+            f"• Monitor {location} and repeat readings as conditions change."
         )
-        response = get_gemini_response(prompt)
-        if "NO_ALERT" not in response:
-            return response
-            
-    return None
-
-async def generate_response(user_text):
-    """Responds to user queries."""
-    
-    # 1. Load System Prompt
-    try:
-        with open('prompts/system_prompt.txt', 'r') as f:
-            system_instructions = f.read()
-    except:
-        system_instructions = "Act as an expert agricultural assistant."
-
-    # 2. Load Sensor Data
-    try:
-        target_file = 'data/heat_sensor.json'
-        if os.path.exists('data/current_sensor.json'):
-            target_file = 'data/current_sensor.json'
-        with open(target_file, 'r') as f:
-            sensor_data = json.load(f)
-    except Exception as e:
-        sensor_data = {"error": "No sensor data"}
-
-    weather_data = get_weather_data()
-    
-    final_prompt = (
-        f"{system_instructions}\n\n"
-        f"CURRENT WEATHER (Davis, CA): {json.dumps(weather_data)}\n"
-        f"FIELD SENSORS: {json.dumps(sensor_data)}\n"
-        f"USER QUESTION: {user_text}\n"
+    return (
+        "Conditions are above freezing. Recommended:\n"
+        "• Continue normal monitoring.\n"
+        "• Plan for possible frost if temps are expected to drop overnight.\n"
+        f"• Keep an eye on {location} and humidity for disease risk."
     )
 
-    return get_gemini_response(final_prompt)
+
+def get_mitigation_response(prompt: str, sensor_data=None) -> str:
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key and genai is not None:
+        try:
+            client = genai.Client(api_key=gemini_key)
+            response = client.models.generate_content(
+                model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+                contents=prompt,
+            )
+            if response and response.text:
+                return response.text.strip()
+        except Exception as e:
+            if os.environ.get("DEBUG_LLM"):
+                print("Gemini:", e, file=sys.stderr)
+
+    if sensor_data is not None:
+        return _fallback_mitigation(sensor_data)
+    return (
+        "Mitigation: Check sensor and protect plants. Cover sensitive crops; "
+        "avoid irrigation. [Set GEMINI_API_KEY in .env.]"
+    )
+
+
+def _load_system_prompt() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(script_dir, "prompts", "system_prompt.txt")
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return TEAMMATE_B_SYSTEM_PROMPT
+
+
+def _read_sensor(script_dir: str, source: str):
+    path = os.path.join(script_dir, "data", f"{source}_sensor.json")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _sensor_to_summary(sensor_data: list) -> tuple[str, object]:
+    if not sensor_data:
+        return "", None
+    readings = sensor_data
+    min_temp = min(r.get("temp_f", 0) for r in readings)
+    max_temp = max(r.get("temp_f", 0) for r in readings)
+    if min_temp <= 28:
+        prefix = "CRITICAL FROST DETECTED. "
+    elif max_temp >= 100:
+        prefix = "CRITICAL HEAT. "
+    else:
+        prefix = ""
+    return prefix, readings[0]
+
+
+def generate_alert(user_text: str, sensor_source: str = "frost") -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    sensor_data = _read_sensor(script_dir, sensor_source)
+    prefix, fallback_ref = _sensor_to_summary(sensor_data)
+
+    system_prompt = _load_system_prompt()
+    json_str = json.dumps(sensor_data, indent=2)
+    final_text = f"{prefix}{json_str}\n\n{system_prompt}\n\n{user_text}"
+
+    return get_mitigation_response(final_text, sensor_data=fallback_ref)
+
+
+async def generate_alert_async(user_text: str, sensor_source: str = "frost") -> str:
+    return generate_alert(user_text, sensor_source=sensor_source)
+
+
+if __name__ == "__main__":
+    source = sys.argv[1] if len(sys.argv) > 1 else "frost"
+    if source not in ("frost", "heat", "normal"):
+        print("Usage: python llm_engine.py [frost|heat|normal]")
+        sys.exit(1)
+    result = generate_alert("What should we do right now?", sensor_source=source)
+    print(result)
