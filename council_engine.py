@@ -17,7 +17,7 @@ load_dotenv()
 
 COUNCIL_MODEL = os.environ.get("COUNCIL_MODEL", "gemini-2.0-flash")
 SCRIPT_DIR = Path(__file__).resolve().parent
-SORCERER_JSON_PATH = SCRIPT_DIR / "sorcerer_mock_data.json"
+WEATHER_JSON_PATH = SCRIPT_DIR / "data" / "weather_mock_data.json"
 
 AGRONOMIST_SYSTEM = (
     "You are a UC Davis Plant Pathologist. Analyze the image and the user's text to identify "
@@ -38,7 +38,7 @@ FOREMAN_SYSTEM = (
 
 def _load_weather_json() -> str:
     try:
-        with open(SORCERER_JSON_PATH, "r", encoding="utf-8") as f:
+        with open(WEATHER_JSON_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         return json.dumps(data, indent=2)
     except FileNotFoundError:

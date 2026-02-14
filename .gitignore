@@ -42,3 +42,5 @@ htmlcov/
 *.spec
 .pdm-python
 .pixi
+
+README.md

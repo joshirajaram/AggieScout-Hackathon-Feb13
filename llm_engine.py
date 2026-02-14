@@ -12,8 +12,10 @@ from dotenv import load_dotenv
 
 try:
     from google import genai
+    from google.genai import types
 except ImportError:
     genai = None
+    types = None
 
 load_dotenv()
 
@@ -44,14 +46,24 @@ def _fallback_mitigation(sensor_data: dict) -> str:
     )
 
 
-def get_mitigation_response(prompt: str, sensor_data=None) -> str:
+def get_mitigation_response(
+    user_query: str,
+    sensor_context: str,
+    system_prompt: str,
+    sensor_data=None,
+) -> str:
     gemini_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_key and genai is not None:
+    if gemini_key and genai is not None and types is not None:
         try:
             client = genai.Client(api_key=gemini_key)
+            user_message = (
+                f"Question: {user_query}\n\n"
+                f"Current sensor data (use this to answer):\n{sensor_context}"
+            )
             response = client.models.generate_content(
                 model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
-                contents=prompt,
+                contents=user_message,
+                config=types.GenerateContentConfig(system_instruction=system_prompt),
             )
             if response and response.text:
                 return response.text.strip()
@@ -104,9 +116,14 @@ def generate_alert(user_text: str, sensor_source: str = "frost") -> str:
 
     system_prompt = _load_system_prompt()
     json_str = json.dumps(sensor_data, indent=2)
-    final_text = f"{prefix}{json_str}\n\n{system_prompt}\n\n{user_text}"
+    sensor_context = f"{prefix}{json_str}" if prefix else json_str
 
-    return get_mitigation_response(final_text, sensor_data=fallback_ref)
+    return get_mitigation_response(
+        user_query=user_text,
+        sensor_context=sensor_context,
+        system_prompt=system_prompt,
+        sensor_data=fallback_ref,
+    )
 
 
 async def generate_alert_async(user_text: str, sensor_source: str = "frost") -> str:
