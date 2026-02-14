@@ -42,46 +42,80 @@ def get_gemini_response(prompt):
     except Exception as e:
         return f"Error: Gemini API returned invalid response - {str(e)}"
 
-async def generate_alert(user_text):
-    """The main bridge between sensor data, user input, and the LLM."""
-    
-    # 1. Load the System Prompt (Teammate 2's instructions)
+async def check_for_alerts():
+    """Autonomous check for emergency conditions without user input."""
+    # 1. Load System Prompt
     try:
-        with open('system_prompt.txt', 'r') as f:
+        with open('prompts/system_prompt.txt', 'r') as f:
             system_instructions = f.read()
     except FileNotFoundError:
-        system_instructions = "Act as an expert agricultural assistant."
+        try: 
+            with open('system_prompt.txt', 'r') as f:
+                system_instructions = f.read()
+        except:
+             system_instructions = "Act as an expert agricultural assistant."
 
-    # 2. Load the Sensor Data (Teammate 2's JSON files)
+    # 2. Load Sensor Data - simulating reading from the 'live' sensor in data/
+    # For the hackathon, we'll pick one file or expect 'data/current.json'
+    # Let's try to find a valid sensor file in data/
+    sensor_data = {}
     try:
-        # Assuming Teammate 2 renames the active file to current_sensor.json for the demo
-        with open('current_sensor.json', 'r') as f:
+        # Check for a 'current.json' first, fallback to 'heat_sensor.json' for demo
+        target_file = 'data/heat_sensor.json' 
+        if os.path.exists('data/current_sensor.json'):
+            target_file = 'data/current_sensor.json'
+            
+        with open(target_file, 'r') as f:
             sensor_data = json.load(f)
     except Exception as e:
-        return f"Error reading sensors: {str(e)}"
+        return None # No data, no alert
 
-    # 3. Failsafe Logic: Add emergency context before the LLM even sees it
+    # 3. Failsafe Logic + Weather
     temp = sensor_data.get('temp_f', 70)
-    emergency_prefix = ""
-    if temp <= 32:
-        emergency_prefix = "⚠️ CRITICAL FROST DETECTED! IMMEDIATE ACTION REQUIRED.\n"
-    elif temp >= 95:
-        emergency_prefix = "🔥 EXTREME HEAT ALERT! IRRIGATION STRESS LIKELY.\n"
-
-    # 4. Combine everything into one contextual prompt
     weather_data = get_weather_data()
+    
+    # Simple Heuristic Trigger for the Hackathon
+    # Use LLM to decide if it's worthy of an alert
+    if temp >= 90 or temp <= 35:
+        prompt = (
+            f"{system_instructions}\n\n"
+            f"TASK: Analyze this situation and generate a short EMERGENCY ALERT if needed. If no emergency, return 'NO_ALERT'.\n"
+            f"REAL-TIME WEATHER: {json.dumps(weather_data)}\n"
+            f"FIELD SENSORS: {json.dumps(sensor_data)}\n"
+        )
+        response = get_gemini_response(prompt)
+        if "NO_ALERT" not in response:
+            return response
+            
+    return None
+
+async def generate_response(user_text):
+    """Responds to user queries."""
+    
+    # 1. Load System Prompt
+    try:
+        with open('prompts/system_prompt.txt', 'r') as f:
+            system_instructions = f.read()
+    except:
+        system_instructions = "Act as an expert agricultural assistant."
+
+    # 2. Load Sensor Data
+    try:
+        target_file = 'data/heat_sensor.json'
+        if os.path.exists('data/current_sensor.json'):
+            target_file = 'data/current_sensor.json'
+        with open(target_file, 'r') as f:
+            sensor_data = json.load(f)
+    except Exception as e:
+        sensor_data = {"error": "No sensor data"}
+
+    weather_data = get_weather_data()
+    
     final_prompt = (
         f"{system_instructions}\n\n"
-        f"CURRENT REAL-TIME WEATHER FOR DAVIS, CA: {json.dumps(weather_data)}\n"
-        f"CURRENT FIELD DATA (JSON): {json.dumps(sensor_data)}\n\n"
-        f"USER QUESTION: {user_text}\n\n"
-        f"CONTEXT: {emergency_prefix}\n"
-        "Please analyze the user's question in the context of the current weather and field data."
+        f"CURRENT WEATHER (Davis, CA): {json.dumps(weather_data)}\n"
+        f"FIELD SENSORS: {json.dumps(sensor_data)}\n"
+        f"USER QUESTION: {user_text}\n"
     )
 
-    # 5. Get the AI to reason through the data
-    # Note: Using a synchronous call in an async function can block the bot.
-    # For a hackathon demo, this is fine. For production, use 'httpx' or 'aiohttp'.
-    result = get_gemini_response(final_prompt)
-    
-    return f"{emergency_prefix}{result}"
+    return get_gemini_response(final_prompt)
