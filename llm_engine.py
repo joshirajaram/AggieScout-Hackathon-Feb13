@@ -26,9 +26,46 @@ TEAMMATE_B_SYSTEM_PROMPT = (
 )
 
 
-def _fallback_mitigation(sensor_data: dict) -> str:
+def _fallback_mitigation(user_query: str, sensor_data: dict) -> str:
     temp = sensor_data.get("temp_f", 0)
+    humidity = sensor_data.get("humidity", 0)
+    wind = sensor_data.get("wind_mph", 0)
     location = sensor_data.get("location") or sensor_data.get("crop") or "the field"
+    
+    query = user_query.lower()
+    
+    # Enhanced keyword-based logic for fallback
+    if query.strip() in ("hi", "hello", "hey", "start", "/start", "help"):
+        if temp <= 32:
+            return f"Hello. WARNING: Current temp is {temp}°F (Critical Frost). Please check your crops immediately."
+        return f"Hello! Current conditions: {temp}°F, Wind {wind} mph, Humidity {humidity}%."
+         
+    if "irrigat" in query or "water" in query:  # Matches "irrigate", "irrigation"
+        if temp > 90:
+            return f"High temp ({temp}°F) detected. Increase irrigation frequency for {location} immediately to prevent heat stress."
+        elif temp < 35:
+            return f"nLow temp ({temp}°F) detected. Avoid irrigation to prevent freezing on plants unless using for frost protection."
+        elif humidity > 80:
+             return f"Humidity is high ({humidity}%). Reduce irrigation to prevent fungal issues."
+        return f"Soil moisture logic unavailable, but environmental conditions (Temp: {temp}°F) are stable. maintain standard irrigation schedule for {location}."
+        
+    if "spray" in query or "pesticide" in query or "fertilizer" in query or "treat" in query:
+        if wind > 10:
+            return f"Wind is {wind} mph. Do NOT spray; drift risk is high."
+        if temp > 85:
+            return f"Temp is {temp}°F. Avoid spraying; evaporation/burn risk is high."
+        if temp < 40:
+             return f"Temp is low ({temp}°F). Spraying may be ineffective or cause freezing damage."
+        return f"Conditions (Wind: {wind} mph, Temp: {temp}°F) are suitable for spraying."
+        
+    if "harvest" in query:
+        if humidity > 80:
+            return f"High humidity ({humidity}%) may affect harvest quality/drying."
+        if temp > 95:
+             return f"Extreme heat ({temp}°F). Ensure worker safety during harvest."
+        return f"Conditions seem favorable for harvest operations."
+
+    # Default logic (original) if no specific keywords match
     if temp <= 32:
         return (
             "CRITICAL FROST – recommended steps:\n"
@@ -72,7 +109,7 @@ def get_mitigation_response(
                 print("Gemini:", e, file=sys.stderr)
 
     if sensor_data is not None:
-        return _fallback_mitigation(sensor_data)
+        return _fallback_mitigation(user_query, sensor_data)
     return (
         "Mitigation: Check sensor and protect plants. Cover sensitive crops; "
         "avoid irrigation. [Set GEMINI_API_KEY in .env.]"
